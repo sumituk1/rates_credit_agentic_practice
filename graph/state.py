@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 
 class ResearchState(TypedDict, total=False):
@@ -9,4 +9,7 @@ class ResearchState(TypedDict, total=False):
     critic: Dict[str, Any]
     decision: str
     iteration: int
+    history: List[Dict[str, Any]]      # all previous (hypothesis, evaluation, critic) triples
+    reasoning_trace: str               # hypothesis agent CoT scratchpad
+    critic_reasoning: str              # critic agent CoT scratchpad
     error: Optional[str]

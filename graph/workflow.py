@@ -9,11 +9,10 @@ from agents.critic_agent import critic_agent
 
 
 # ---------------------------------------------------------------------------
-# Signal dispatch: map hypothesis signal_name → (signal Series, returns Series)
+# Signal dispatch: map hypothesis → (signal Series, returns Series)
 # ---------------------------------------------------------------------------
 
 def _load_curve_signal(signal_name: str, start: str) -> tuple:
-    """Build a yield-curve z-score signal and approximate bond returns."""
     from data.loaders.fred import load_us_yields
     from data.processing.yield_curve import add_curve_features, yield_to_approx_returns
     import yaml
@@ -22,25 +21,25 @@ def _load_curve_signal(signal_name: str, start: str) -> tuple:
     cfg = yaml.safe_load(open(Path(__file__).parent.parent / "config" / "settings.yaml"))
     window = cfg["backtest"]["zscore_window"]
 
-    df = load_us_yields(start=start)
+    df = load_us_yields(start=start).ffill().dropna()
     df = add_curve_features(df, zscore_window=window)
     df = df.ffill().dropna()
 
     if "5s30" in signal_name:
         signal = df["us_5s30s_zscore"]
         returns = yield_to_approx_returns(df["us_30y"], duration_years=20.0).reindex(signal.index).ffill()
-    else:  # default to 2s10s
+    else:
         signal = df["us_2s10s_zscore"]
         returns = yield_to_approx_returns(df["us_10y"], duration_years=9.0).reindex(signal.index).ffill()
 
     return signal.dropna(), returns.dropna()
 
 
-def _load_fx_carry_signal(instruments: list[str], start: str) -> tuple:
-    """Build FX carry z-score signal and FX log returns."""
+def _load_fx_carry_signal(instruments: list, start: str) -> tuple:
     from data.loaders.yahoo import load_fx_returns, FX_TICKERS
     from data.loaders.fred import load_us_yields
     from data.processing.fx_carry import fx_carry_signal
+    import pandas as pd
     import yaml
     from pathlib import Path
 
@@ -59,14 +58,10 @@ def _load_fx_carry_signal(instruments: list[str], start: str) -> tuple:
         if "=X" in inst:
             ticker = inst
             break
-
     if ticker is None:
         ticker = "EURUSD=X"
 
     fx_ret = load_fx_returns(ticker, start=start)
-
-    # Use a placeholder flat foreign rate of 0 when no foreign rate data
-    import pandas as pd
     foreign_rate = pd.Series(0.0, index=us_rate.index)
 
     signal = fx_carry_signal(us_rate, foreign_rate, zscore_window=window)
@@ -74,8 +69,11 @@ def _load_fx_carry_signal(instruments: list[str], start: str) -> tuple:
     return signal.loc[common_idx].dropna(), fx_ret.loc[common_idx].dropna()
 
 
+# ---------------------------------------------------------------------------
+# Backtest node
+# ---------------------------------------------------------------------------
+
 def backtest_node(state: ResearchState) -> ResearchState:
-    """LangGraph node: maps hypothesis to data + signal, then runs backtest."""
     from backtests.engine import run_long_short_backtest
     import yaml
     from pathlib import Path
@@ -111,17 +109,35 @@ def backtest_node(state: ResearchState) -> ResearchState:
 
 
 # ---------------------------------------------------------------------------
+# History node — appends completed iteration before routing
+# ---------------------------------------------------------------------------
+
+def record_iteration(state: ResearchState) -> ResearchState:
+    """Append the current hypothesis + evaluation + critic decision to history."""
+    history = list(state.get("history") or [])
+    history.append({
+        "hypothesis": state.get("hypothesis", {}),
+        "evaluation": state.get("evaluation", {}),
+        "critic": state.get("critic", {}),
+        "reasoning_trace": state.get("reasoning_trace", ""),
+        "critic_reasoning": state.get("critic_reasoning", ""),
+    })
+    state["history"] = history
+    return state
+
+
+# ---------------------------------------------------------------------------
 # Conditional routing
 # ---------------------------------------------------------------------------
 
-def route_after_critic(state: ResearchState) -> str:
+def route_after_record(state: ResearchState) -> str:
     decision = state.get("decision", "reject")
     iteration = state.get("iteration", 0)
+    max_iter = 5
 
     if decision == "accept":
         return "end"
 
-    max_iter = 5
     if iteration >= max_iter:
         print(f"[workflow] max iterations ({max_iter}) reached — stopping.")
         return "end"
@@ -141,16 +157,18 @@ def build_graph():
     graph.add_node("backtest", backtest_node)
     graph.add_node("evaluate", evaluate_strategy)
     graph.add_node("critic", critic_agent)
+    graph.add_node("record", record_iteration)
 
     graph.set_entry_point("hypothesis")
 
     graph.add_edge("hypothesis", "backtest")
     graph.add_edge("backtest", "evaluate")
     graph.add_edge("evaluate", "critic")
+    graph.add_edge("critic", "record")
 
     graph.add_conditional_edges(
-        "critic",
-        route_after_critic,
+        "record",
+        route_after_record,
         {
             "retry": "hypothesis",
             "end": END,

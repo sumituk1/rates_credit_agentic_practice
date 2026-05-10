@@ -1,65 +1,149 @@
 # Quant Research Agent — LangGraph + Llama 3.2
 
 End-to-end automated research system for rates and FX strategies.  
-**LLM proposes → Python validates → LangGraph iterates.**
+**LLM reasons → Python validates → LangGraph iterates.**
+
+---
+
+## How the Reasoning Works
+
+This is not prompt-filling. Each LLM call uses **explicit chain-of-thought (CoT)** — the model
+is required to reason step-by-step through a structured scratchpad before it is allowed to
+output a decision. The reasoning trace is captured and printed at runtime so you can audit it.
+
+### Hypothesis Agent — 5-Step CoT with Live Macro Context
+
+Before proposing a signal, the LLM must answer five questions in sequence:
+
+```
+STEP 1 — REGIME ANALYSIS
+  What does the current yield curve shape imply?
+  Steep / flat / inverted → which macro regime?
+
+STEP 2 — SIGNAL FAMILY SELECTION
+  Given the regime, which family has edge?
+  Why this family over the others right now?
+
+STEP 3 — INSTRUMENT & PARAMETER SELECTION
+  Which instruments? What lookback window?
+  Why these over alternatives?
+
+STEP 4 — ECONOMIC MECHANISM
+  Carry / mean-reversion / momentum / flow logic?
+  Why should this signal predict forward returns?
+
+STEP 5 — FAILURE MODES
+  Under what conditions does the signal break?
+  How does this attempt address weaknesses from prior iterations?
+
+→ Only after step 5: emit structured JSON hypothesis
+```
+
+**Live macro context is injected at prompt time** — the agent fetches the latest FRED yield
+curve (2y, 5y, 10y, 30y) and feeds it directly into the prompt. The LLM reasons about
+real numbers, not a hypothetical market.
+
+**Iteration memory** — a summary of every previous signal, its Sharpe, drawdown, and the
+critic's rejection reason is included in the prompt. The agent is explicitly required to
+propose something different and explain why.
+
+### Critic Agent — 4-Step CoT with Full Iteration History
+
+The critic receives the full backtest metrics and the complete history of all prior iterations.
+It must reason through four steps before deciding:
+
+```
+STEP 1 — STATISTICAL VALIDITY
+  Check each threshold explicitly:
+  Sharpe >= 0.5? MaxDD >= -0.25? Both sub-period Sharpes > 0?
+
+STEP 2 — ROBUSTNESS
+  Is edge consistent across both halves of the sample?
+  Genuinely better than previous iterations, or minor variation?
+
+STEP 3 — BIAS & RISK FLAGS
+  Lookahead risk? Holding period vs. signal frequency?
+  Turnover realistic under transaction costs?
+
+STEP 4 — DECISION + SPECIFIC SUGGESTION
+  State decision with metric citations.
+  If refining: ONE concrete, surgical change
+  (e.g. "increase z-score lookback from 60→120 days given flat curve regime")
+
+→ Only after step 4: emit JSON {decision, reason, suggestion}
+```
+
+**Rule-based fallback** — if the LLM fails to produce valid JSON after 3 attempts, the critic
+falls back to hard threshold rules so the loop always continues cleanly.
 
 ---
 
 ## Architecture
 
 ```
-Data Layer  →  Feature Engineering  →  Hypothesis Agent (Llama)
-                                               ↓
-                             Signal Construction + Backtest (pandas)
-                                               ↓
-                             Evaluation Agent  →  Sharpe / Drawdown
-                                               ↓
-                                        Critic Agent (Llama)
-                                               ↓
-                               Refinement Loop (LangGraph, max 5 iters)
+┌─────────────────────────────────────────────────────────────────┐
+│                        LangGraph Loop                           │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  [hypothesis]                                            │   │
+│  │  • Fetch live FRED yield curve                           │   │
+│  │  • Inject history of failed attempts                     │   │
+│  │  • 5-step CoT → JSON hypothesis                          │   │
+│  └──────────────────┬───────────────────────────────────────┘   │
+│                     │                                           │
+│  ┌──────────────────▼───────────────────────────────────────┐   │
+│  │  [backtest]  (pure Python / pandas)                      │   │
+│  │  • Dispatch signal_name → FRED yields or Yahoo FX        │   │
+│  │  • Compute z-score signal                                │   │
+│  │  • Long-short backtest with transaction costs            │   │
+│  └──────────────────┬───────────────────────────────────────┘   │
+│                     │                                           │
+│  ┌──────────────────▼───────────────────────────────────────┐   │
+│  │  [evaluate]  (pure Python)                               │   │
+│  │  • Sharpe, max drawdown, ann. return, turnover           │   │
+│  │  • Sub-period split check (first half / second half)     │   │
+│  └──────────────────┬───────────────────────────────────────┘   │
+│                     │                                           │
+│  ┌──────────────────▼───────────────────────────────────────┐   │
+│  │  [critic]                                                │   │
+│  │  • Receives full history of all iterations               │   │
+│  │  • 4-step CoT → JSON {decision, reason, suggestion}      │   │
+│  │  • Rule-based fallback on parse failure                  │   │
+│  └──────────────────┬───────────────────────────────────────┘   │
+│                     │                                           │
+│  ┌──────────────────▼───────────────────────────────────────┐   │
+│  │  [record]  (pure Python)                                 │   │
+│  │  • Append iteration to history list                      │   │
+│  │  • Store CoT reasoning traces                            │   │
+│  └──────────────────┬───────────────────────────────────────┘   │
+│                     │                                           │
+│            accept / max_iters ──→ END                           │
+│            reject / refine ─────→ [hypothesis]  (next iter)    │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### State object (`graph/state.py`)
+
+| Field | Type | Purpose |
+|---|---|---|
+| `hypothesis` | dict | Current JSON hypothesis from Llama |
+| `backtest_results` | DataFrame | Raw backtest output |
+| `evaluation` | dict | Sharpe, drawdown, sub-period metrics |
+| `critic` | dict | `{decision, reason, suggestion}` |
+| `decision` | str | `accept / reject / refine` |
+| `iteration` | int | Loop counter (max 5) |
+| `history` | list | All prior `(hypothesis, evaluation, critic)` triples |
+| `reasoning_trace` | str | Hypothesis agent CoT scratchpad (human-readable) |
+| `critic_reasoning` | str | Critic agent CoT scratchpad (human-readable) |
+| `error` | str | Last backtest error, if any |
 
 ### Agents
 
-| Agent | File | Role |
-|---|---|---|
-| **Hypothesis Agent** | `agents/hypothesis_agent.py` | Calls Llama → generates a structured JSON trading hypothesis (signal name, instruments, trade rule, rationale) |
-| **Evaluation Agent** | `agents/evaluation_agent.py` | Pure Python — computes Sharpe, max drawdown, annualised return, avg turnover from backtest results |
-| **Critic Agent** | `agents/critic_agent.py` | Calls Llama → reads hypothesis + evaluation → returns `accept / reject / refine` with a reason and suggestion |
-
-### LangGraph Nodes & Edges
-
-```
-[hypothesis] → [backtest] → [evaluate] → [critic]
-                                              │
-                   ┌──────── refine ──────────┘
-                   │         (up to 5 iterations)
-                   │
-              [hypothesis]
-                   │
-              accept / max_iters → END
-```
-
-State object: `graph/state.py → ResearchState`
-
-Fields carried through the graph:
-- `hypothesis` — LLM-generated JSON
-- `data` — loaded DataFrames (lazy, per run)
-- `backtest_results` — pandas DataFrame from engine
-- `evaluation` — `{sharpe, max_drawdown, annualized_return, avg_turnover}`
-- `critic` — `{decision, reason, suggestion}`
-- `decision` — `"accept" | "reject" | "refine"`
-- `iteration` — loop counter
-
-### Strategy Families Supported
-
-| Theme | Signal | Instruments |
-|---|---|---|
-| Rates curve | 2s10s steepening z-score | FRED DGS2, DGS10 |
-| Rates curve | 5s30s flattening momentum | FRED DGS5, DGS30 |
-| FX carry | Rate differential | EURUSD=X, GBPUSD=X, USDJPY=X, AUDUSD=X |
-| Positioning | COT net speculative positioning | FX futures (placeholder v0.2) |
-| Cross-asset | Carry + trend composite | G10 FX |
+| Agent | File | LLM? | What it does |
+|---|---|---|---|
+| **Hypothesis** | `agents/hypothesis_agent.py` | Yes — 5-step CoT | Reasons through macro regime → proposes signal |
+| **Evaluation** | `agents/evaluation_agent.py` | No — pure Python | Sharpe, drawdown, sub-period split |
+| **Critic** | `agents/critic_agent.py` | Yes — 4-step CoT | Reasons through metrics + history → decision |
 
 ---
 
@@ -82,10 +166,8 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Edit .env and set FRED_API_KEY
-# Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+# Free key: https://fred.stlouisfed.org/docs/api/api_key.html
 ```
-
-`.env` is git-ignored. The app loads it automatically via `python-dotenv`.
 
 ### 3. Ollama — local Llama 3.2
 
@@ -94,61 +176,106 @@ Ollama serves Llama locally over HTTP at `http://localhost:11434`.
 ```bash
 # macOS (Homebrew)
 brew install ollama
-
-# Or download the installer from https://ollama.com/download
 ```
 
-**Pull and run Llama 3.2:**
+**Start the server and pull the model:**
 
 ```bash
-# Terminal 1 — start the server (leave this running)
+# Terminal 1 — leave this running
 ollama serve
 
-# Terminal 2 — pull the model (one-time, ~2 GB)
+# Terminal 2 — one-time download (~2 GB)
 ollama pull llama3.2
 
-# Optional smoke test in the terminal
+# Quick sanity check
 ollama run llama3.2 "Return the word OK and nothing else."
 ```
 
-Ollama exposes a REST API at `http://localhost:11434`.  
-LangChain's `ChatOllama` talks to this URL automatically — no API key needed.
+**Connecting the code to Ollama:**  
+`models/llm.py` uses `langchain_ollama.ChatOllama` which talks to `http://localhost:11434`
+automatically. No API key needed. The model name is read from `config/settings.yaml`.
 
-**Changing the model:**  
-Edit `config/settings.yaml → llm.model` to switch to any model you have pulled
-(e.g. `llama3.1`, `mistral`, `qwen2.5`). The code reads this at runtime.
+**Switching models:**
+
+```yaml
+# config/settings.yaml
+llm:
+  model: "llama3.2"        # change to any model you have pulled
+  temperature: 0.2
+```
 
 ```bash
-# List models you have locally
+# List models available locally
 ollama list
+
+# Pull a reasoning-optimised model for stronger CoT
+ollama pull deepseek-r1     # DeepSeek R1 — explicit <think> traces
+ollama pull qwen2.5         # Qwen 2.5 — strong instruction following
 ```
+
+> **Tip:** Swap `model: "deepseek-r1"` in `settings.yaml` for significantly stronger
+> chain-of-thought. DeepSeek R1 produces explicit `<think>...</think>` reasoning blocks
+> before answering — ideal for the hypothesis and critic agents.
 
 ---
 
 ## Running the Pipeline
 
 ```bash
-# Activate venv first
 source venv/bin/activate
 
-# Full research loop (hypothesis → backtest → critic, up to 5 iterations)
+# Full research loop — runs up to 5 iterations
 python main.py
 ```
 
-The loop prints each state transition and the final accepted (or best) strategy.
+**Sample output structure:**
+
+```
+══════════════════════════════════════
+  ITERATION 1 — us_2s10s_zscore  (REFINE)
+══════════════════════════════════════
+
+── HYPOTHESIS REASONING (CoT) ───────
+STEP 1 — REGIME ANALYSIS:
+The current 2s10s spread of +0.42 bps indicates a marginally steep curve,
+consistent with an early-to-mid easing cycle...
+
+STEP 2 — SIGNAL FAMILY SELECTION:
+Given the steepening bias, a long-steepener z-score signal should have
+mean-reversion edge as curve normalises from inversion...
+...
+
+── EVALUATION ───────────────────────
+  Sharpe            : 0.412
+  Max drawdown      : -0.183
+  First-half Sharpe : 0.631
+  Second-half Sharpe: 0.188   ← weak second half flagged by critic
+
+── CRITIC REASONING (CoT) ───────────
+STEP 1 — STATISTICAL VALIDITY:
+Sharpe 0.41 < 0.50 threshold. MaxDD -0.18 passes. Second-half Sharpe
+0.19 > 0 but very weak. Does not meet acceptance criteria...
+
+STEP 4 — DECISION:
+Refine. The signal degrades in the second half, likely because the 60-day
+lookback is too short to span a full rate cycle...
+
+── CRITIC DECISION ──────────────────
+  Decision  : REFINE
+  Reason    : Sharpe 0.41 below threshold; second-half edge near zero
+  Suggestion: Increase z-score lookback from 60 to 120 days
+```
 
 ---
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+# All tests (pure Python — no LLM, no network)
+pytest tests/test_backtest_metrics.py tests/test_data_loaders.py tests/test_graph.py -v
 
 # LLM smoke test (requires Ollama running)
-pytest tests/test_llm.py -v
-
-# Pure Python tests (no LLM needed)
-pytest tests/test_backtest_metrics.py tests/test_data_loaders.py -v
+pytest tests/test_llm.py -v -m integration
 ```
 
 ---
@@ -159,97 +286,76 @@ pytest tests/test_backtest_metrics.py tests/test_data_loaders.py -v
 quant-agents/
 │
 ├── agents/
-│   ├── hypothesis_agent.py     # LLM → structured JSON hypothesis
-│   ├── critic_agent.py         # LLM → accept / reject / refine
-│   └── evaluation_agent.py     # Compute Sharpe, drawdown, turnover
+│   ├── hypothesis_agent.py   # 5-step CoT + live FRED context + iteration memory
+│   ├── critic_agent.py       # 4-step CoT + full history + rule-based fallback
+│   └── evaluation_agent.py   # Pure Python — Sharpe, drawdown, sub-period split
 │
 ├── data/
 │   ├── loaders/
-│   │   ├── yahoo.py            # yfinance wrapper
-│   │   ├── fred.py             # FRED API wrapper (rates)
-│   │   ├── ecb.py              # ECB SDW (placeholder v0.2)
-│   │   └── cot.py              # CFTC COT (placeholder v0.2)
+│   │   ├── fred.py           # FRED API (US yields, arbitrary series)
+│   │   ├── yahoo.py          # yfinance FX tickers
+│   │   ├── ecb.py            # ECB SDW placeholder (v0.2)
+│   │   └── cot.py            # CFTC COT placeholder (v0.2)
 │   └── processing/
-│       ├── yield_curve.py      # 2s10s, 5s30s spreads + momentum
-│       ├── fx_carry.py         # Rate differential, FX returns
-│       ├── positioning.py      # COT positioning features
-│       └── common.py           # Rolling z-score utility
+│       ├── yield_curve.py    # 2s10s, 5s30s spreads, z-scores, approx bond returns
+│       ├── fx_carry.py       # Rate differential, FX carry z-score
+│       ├── positioning.py    # COT net positioning z-score
+│       └── common.py         # Rolling z-score utility
 │
 ├── backtests/
-│   ├── engine.py               # Vectorised pandas backtest
-│   ├── metrics.py              # Sharpe, max drawdown, annualised return
-│   └── validation.py           # Walk-forward validation, sub-period checks
+│   ├── engine.py             # Vectorised long-only and long-short pandas backtest
+│   ├── metrics.py            # Sharpe, max drawdown, ann. return, Calmar
+│   └── validation.py         # Walk-forward, sub-period check, min history gate
 │
 ├── graph/
-│   ├── state.py                # ResearchState TypedDict
-│   └── workflow.py             # LangGraph nodes, edges, conditional routing
+│   ├── state.py              # ResearchState TypedDict (incl. history + reasoning traces)
+│   └── workflow.py           # LangGraph nodes, edges, history recording, routing
 │
 ├── models/
-│   └── llm.py                  # ChatOllama wrapper + config loader
+│   └── llm.py                # ChatOllama wrapper — reads model from settings.yaml
 │
 ├── config/
-│   └── settings.yaml           # LLM model, backtest params, thresholds
-│
-├── notebooks/
-│   ├── 01_data_sanity_check.ipynb
-│   └── 02_first_backtest.ipynb
+│   └── settings.yaml         # LLM model, backtest params, thresholds
 │
 ├── tests/
-│   ├── test_llm.py
-│   ├── test_data_loaders.py
-│   ├── test_backtest_metrics.py
-│   └── test_graph.py
+│   ├── test_llm.py           # Ollama smoke test (integration, needs Ollama running)
+│   ├── test_data_loaders.py  # Feature engineering unit tests (no network)
+│   ├── test_backtest_metrics.py  # Backtest engine + metrics unit tests
+│   └── test_graph.py         # Graph compilation tests
 │
-├── main.py                     # CLI entry point
+├── main.py                   # CLI — runs the loop, prints full CoT traces
 ├── requirements.txt
 ├── .env.example
-├── .gitignore
-└── README.md
+└── .gitignore
 ```
 
 ---
 
 ## Validation Requirements
 
-All backtests must satisfy:
-
 - **No lookahead bias** — positions use `signal.shift(1)` before computing returns
 - **Transaction costs** — estimated at `transaction_cost_bps / 10_000` per unit of turnover
 - **Minimum history** — 252 trading days required before accepting a result
-- **Sub-period analysis** — evaluation splits history at the midpoint and checks both halves
-- **Turnover analysis** — high turnover strategies penalised in critic decision
+- **Sub-period analysis** — evaluation splits history at midpoint; both halves checked
+- **Iteration memory** — critic explicitly compares against all prior failed attempts
 
 ---
 
-## Acceptance Criteria (v0.1.0)
+## Upgrading to Stronger Reasoning
 
-- [ ] Ollama/Llama 3.2 responds through LangChain
-- [ ] LangGraph workflow executes end-to-end
-- [ ] Yahoo + FRED data loads successfully
-- [ ] At least one yield-curve feature generated
-- [ ] At least one FX return series backtested
-- [ ] Sharpe and drawdown calculated
-- [ ] Critic agent returns accept / reject / refine
-
----
-
-## Risks & Known Limitations
-
-| Risk | Mitigation |
-|---|---|
-| Llama produces weak / hallucinated JSON | Retry parser with regex extraction + Pydantic validation |
-| Lookahead bias | `signal.shift(1)` enforced in `engine.py`; validation test in `tests/` |
-| Overfitting | Walk-forward validation in `backtests/validation.py` |
-| COT data lag | Weekly input only; treated as slow-moving filter, not primary signal |
-| Llama 3.2 speed | ~5–15 sec per call on M-series Mac; acceptable for research loop |
+| Model | How to use | What improves |
+|---|---|---|
+| `deepseek-r1` | `ollama pull deepseek-r1` | Native `<think>` traces; stronger logical reasoning in critic |
+| `qwen2.5` | `ollama pull qwen2.5` | Better instruction following; more reliable JSON output |
+| Claude / GPT-4o | Set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`; swap `llm.py` | Production-quality hypothesis generation |
 
 ---
 
 ## v0.2.0 Roadmap
 
+- Full ReAct pattern — give hypothesis agent tool access (load data, plot, compute stats mid-reasoning)
 - Walk-forward parameter sweeps
-- MLflow or SQLite experiment tracking
-- Strategy memory (failed hypotheses not repeated)
+- SQLite experiment tracking — persist all iterations across sessions
+- Strategy memory — failed hypotheses stored in a vector DB so they survive process restarts
 - ECB SDW + CFTC COT full implementation
-- Optional Claude / GPT upgrade for higher-quality hypothesis generation
-- Portfolio-level capital allocation and risk scaling
+- Portfolio-level capital allocation and Kelly sizing
