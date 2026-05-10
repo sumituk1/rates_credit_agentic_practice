@@ -1,0 +1,18 @@
+llm:
+  model: "llama3.2"
+  temperature: 0.2
+  base_url: "http://localhost:11434"
+
+data:
+  start_date: "2010-01-01"
+
+backtest:
+  transaction_cost_bps: 1.0
+  zscore_window: 60
+  min_history_days: 252
+
+strategy:
+  max_iterations: 5
+  sharpe_threshold: 0.5
+  max_drawdown_threshold: -0.25
+  max_turnover: 0.5
