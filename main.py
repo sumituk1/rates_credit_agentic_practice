@@ -1,4 +1,5 @@
 import json
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,8 +21,11 @@ def main() -> None:
     print("=" * 60)
     print("  Quant Research Agent — LangGraph + Llama")
     print("=" * 60)
+    print("[run] invoking graph...", flush=True)
+    t0 = time.time()
 
     result = app.invoke(initial_state)
+    print(f"[run] graph finished in {time.time() - t0:.1f}s", flush=True)
 
     history = result.get("history", [])
     print(f"\n[Loop complete] {len(history)} iteration(s), decision='{result.get('decision')}'")

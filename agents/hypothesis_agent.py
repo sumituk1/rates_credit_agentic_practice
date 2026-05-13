@@ -63,6 +63,16 @@ def _get_macro_context() -> str:
 def _history_summary(history: List[Dict[str, Any]]) -> str:
     if not history:
         return "None — this is the first attempt."
+
+    def _fmt_metric(value: Any) -> str:
+        """Format metrics defensively for mixed runtime types."""
+        if value is None:
+            return "?"
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+
     lines = []
     for i, entry in enumerate(history, 1):
         h = entry.get("hypothesis", {})
@@ -70,8 +80,8 @@ def _history_summary(history: List[Dict[str, Any]]) -> str:
         c = entry.get("critic", {})
         lines.append(
             f"  Attempt {i}: signal='{h.get('signal_name', '?')}' | "
-            f"Sharpe={e.get('sharpe', '?'):.2f} | "
-            f"MaxDD={e.get('max_drawdown', '?'):.2f} | "
+            f"Sharpe={_fmt_metric(e.get('sharpe'))} | "
+            f"MaxDD={_fmt_metric(e.get('max_drawdown'))} | "
             f"Decision={c.get('decision', '?')} | "
             f"Critic said: '{c.get('reason', '?')}' | "
             f"Suggestion: '{c.get('suggestion', '?')}'"
@@ -156,6 +166,53 @@ def _extract_reasoning(text: str) -> str:
     return text[:idx].strip() if idx != -1 else ""
 
 
+def _parse_hypothesis_json(text: str, llm: Any) -> Dict[str, Any]:
+    """Parse hypothesis JSON and attempt one LLM-based repair if malformed."""
+    candidate = _extract_json(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        repair_prompt = (
+            "Convert the following content into STRICT valid JSON.\n"
+            "Return ONLY a single JSON object with keys exactly:\n"
+            "hypothesis, asset_class, instruments, signal_name, signal_definition, trade_rule, holding_period_days, rationale.\n"
+            "Rules:\n"
+            "- trade_rule must be a plain string, not an object\n"
+            "- holding_period_days must be an integer\n"
+            "- instruments must be a list of strings\n\n"
+            f"Input:\n{candidate}"
+        )
+        repaired_raw = llm.invoke([HumanMessage(content=repair_prompt)])
+        repaired_text = repaired_raw.content if hasattr(repaired_raw, "content") else str(repaired_raw)
+        return json.loads(_extract_json(repaired_text))
+
+
+def _normalize_hypothesis_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize model payload to match Hypothesis schema."""
+    normalized = dict(payload)
+
+    instruments = normalized.get("instruments")
+    if isinstance(instruments, str):
+        normalized["instruments"] = [instruments]
+    elif isinstance(instruments, list):
+        normalized["instruments"] = [str(item) for item in instruments]
+
+    trade_rule = normalized.get("trade_rule")
+    if isinstance(trade_rule, dict):
+        normalized["trade_rule"] = json.dumps(trade_rule, ensure_ascii=True)
+    elif trade_rule is not None:
+        normalized["trade_rule"] = str(trade_rule)
+
+    holding_period = normalized.get("holding_period_days")
+    if holding_period is not None:
+        try:
+            normalized["holding_period_days"] = int(holding_period)
+        except (TypeError, ValueError):
+            pass
+
+    return normalized
+
+
 def generate_hypothesis(state: Dict[str, Any]) -> Dict[str, Any]:
     """LangGraph node: CoT hypothesis generation with macro context + iteration memory."""
     llm = get_llm()
@@ -173,8 +230,9 @@ def generate_hypothesis(state: Dict[str, Any]) -> Dict[str, Any]:
         raw = llm.invoke([HumanMessage(content=prompt)])
         text = raw.content if hasattr(raw, "content") else str(raw)
         try:
-            parsed = json.loads(_extract_json(text))
-            hypothesis = Hypothesis(**parsed)
+            parsed = _parse_hypothesis_json(text, llm)
+            normalized = _normalize_hypothesis_payload(parsed)
+            hypothesis = Hypothesis(**normalized)
             state["hypothesis"] = hypothesis.model_dump()
             state["reasoning_trace"] = _extract_reasoning(text)
             return state
