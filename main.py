@@ -53,14 +53,20 @@ def main() -> None:
 
         _log_section("HYPOTHESIS", json.dumps(h, indent=2, default=str))
 
+        def _f(val, fmt=".3f"):
+            try:
+                return format(float(val), fmt)
+            except (TypeError, ValueError):
+                return "?"
+
         _log_section(
             "EVALUATION",
-            f"  Sharpe            : {e.get('sharpe', '?'):.3f}\n"
-            f"  Max drawdown      : {e.get('max_drawdown', '?'):.3f}\n"
-            f"  Ann. return       : {e.get('annualized_return', '?'):.3f}\n"
-            f"  Avg turnover      : {e.get('avg_turnover', '?'):.4f}\n"
-            f"  First-half Sharpe : {e.get('first_half_sharpe', '?'):.3f}\n"
-            f"  Second-half Sharpe: {e.get('second_half_sharpe', '?'):.3f}\n"
+            f"  Sharpe            : {_f(e.get('sharpe'))}\n"
+            f"  Max drawdown      : {_f(e.get('max_drawdown'))}\n"
+            f"  Ann. return       : {_f(e.get('annualized_return'))}\n"
+            f"  Avg turnover      : {_f(e.get('avg_turnover'), '.4f')}\n"
+            f"  First-half Sharpe : {_f(e.get('first_half_sharpe'))}\n"
+            f"  Second-half Sharpe: {_f(e.get('second_half_sharpe'))}\n"
             f"  Observations      : {e.get('n_obs', '?')}",
         )
 
