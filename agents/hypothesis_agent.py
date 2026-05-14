@@ -20,6 +20,9 @@ from langchain_core.messages import HumanMessage
 from models.llm import get_llm
 
 
+SUPPORTED_SIGNAL_NAMES = ["us_2s10s_zscore", "us_5s30s_zscore", "fx_carry"]
+
+
 class Hypothesis(BaseModel):
     hypothesis: str
     asset_class: str
@@ -28,6 +31,7 @@ class Hypothesis(BaseModel):
     signal_definition: str
     trade_rule: str
     holding_period_days: int
+    zscore_window: int
     rationale: str
 
 
@@ -80,6 +84,7 @@ def _history_summary(history: List[Dict[str, Any]]) -> str:
         c = entry.get("critic", {})
         lines.append(
             f"  Attempt {i}: signal='{h.get('signal_name', '?')}' | "
+            f"zscore_window={h.get('zscore_window', '?')} | "
             f"Sharpe={_fmt_metric(e.get('sharpe'))} | "
             f"MaxDD={_fmt_metric(e.get('max_drawdown'))} | "
             f"Decision={c.get('decision', '?')} | "
@@ -113,13 +118,17 @@ How does the regime favour or disfavour each signal family?
 
 STEP 2 — SIGNAL FAMILY SELECTION:
 Given the regime, which signal family has the strongest edge?
-Choose from: yield curve steepener/flattener (2s10s or 5s30s z-score),
-FX carry (rate differential), rates differential, COT positioning.
-Explain why this family over the others right now.
+You MUST choose signal_name from exactly one of these three supported values:
+  - "us_2s10s_zscore"  → long/short 10Y bond based on 2s10s spread z-score
+  - "us_5s30s_zscore"  → long/short 30Y bond based on 5s30s spread z-score
+  - "fx_carry"         → long/short EURUSD based on USD carry signal
+Do NOT invent other signal names — they will not be computed.
+If previous attempts used a signal, you must pick a DIFFERENT one.
 
 STEP 3 — INSTRUMENT & PARAMETER SELECTION:
-Which specific instruments? What lookback window for the z-score?
-Why these over alternatives? What data is clean and liquid?
+Which specific instruments? What zscore_window (lookback in days) for the z-score?
+Default is 60 days. If prior attempts failed, try a meaningfully different window (e.g. 30, 90, 120, 252).
+Why these parameters over alternatives?
 
 STEP 4 — ECONOMIC MECHANISM:
 What is the transmission mechanism? Why should this signal predict forward returns?
@@ -137,10 +146,11 @@ The JSON must start with ```json and end with ```.
   "hypothesis": "<one crisp sentence describing the trade>",
   "asset_class": "<Rates | FX | Cross-Asset>",
   "instruments": ["<ticker or FRED series id>", "..."],
-  "signal_name": "<snake_case, e.g. us_2s10s_zscore>",
+  "signal_name": "<must be one of: us_2s10s_zscore, us_5s30s_zscore, fx_carry>",
   "signal_definition": "<how to compute the signal — be precise>",
   "trade_rule": "<when to go long, when to go short, when flat>",
   "holding_period_days": <integer>,
+  "zscore_window": <integer, lookback days for z-score, e.g. 30/60/90/120/252>,
   "rationale": "<1-2 sentences synthesising steps 1-4>"
 }}
 ```"""

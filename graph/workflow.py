@@ -90,17 +90,22 @@ def critic_node(state: ResearchState) -> ResearchState:
     )
     return out
 
-def _load_curve_signal(signal_name: str, start: str) -> tuple:
+def _resolve_window(hypothesis_window: int | None, cfg: dict) -> int:
+    """Use hypothesis-supplied zscore_window if valid, else fall back to config default."""
+    default = cfg["backtest"]["zscore_window"]
+    try:
+        w = int(hypothesis_window)
+        return w if w > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_curve_signal(signal_name: str, start: str, zscore_window: int) -> tuple:
     from data.loaders.fred import load_us_yields
     from data.processing.yield_curve import add_curve_features, yield_to_approx_returns
-    import yaml
-    from pathlib import Path
-
-    cfg = yaml.safe_load(open(Path(__file__).parent.parent / "config" / "settings.yaml"))
-    window = cfg["backtest"]["zscore_window"]
 
     df = load_us_yields(start=start).ffill().dropna()
-    df = add_curve_features(df, zscore_window=window)
+    df = add_curve_features(df, zscore_window=zscore_window)
     df = df.ffill().dropna()
 
     if "5s30" in signal_name:
@@ -113,16 +118,11 @@ def _load_curve_signal(signal_name: str, start: str) -> tuple:
     return signal.dropna(), returns.dropna()
 
 
-def _load_fx_carry_signal(instruments: list, start: str) -> tuple:
+def _load_fx_carry_signal(instruments: list, start: str, zscore_window: int) -> tuple:
     from data.loaders.yahoo import load_fx_returns, FX_TICKERS
     from data.loaders.fred import load_us_yields
     from data.processing.fx_carry import fx_carry_signal
     import pandas as pd
-    import yaml
-    from pathlib import Path
-
-    cfg = yaml.safe_load(open(Path(__file__).parent.parent / "config" / "settings.yaml"))
-    window = cfg["backtest"]["zscore_window"]
 
     yields = load_us_yields(start=start).ffill().dropna()
     us_rate = yields["us_2y"]
@@ -142,7 +142,7 @@ def _load_fx_carry_signal(instruments: list, start: str) -> tuple:
     fx_ret = load_fx_returns(ticker, start=start)
     foreign_rate = pd.Series(0.0, index=us_rate.index)
 
-    signal = fx_carry_signal(us_rate, foreign_rate, zscore_window=window)
+    signal = fx_carry_signal(us_rate, foreign_rate, zscore_window=zscore_window)
     common_idx = signal.index.intersection(fx_ret.index)
     return signal.loc[common_idx].dropna(), fx_ret.loc[common_idx].dropna()
 
@@ -164,16 +164,17 @@ def backtest_node(state: ResearchState) -> ResearchState:
     signal_name = (hypothesis.get("signal_name") or "").lower()
     instruments = hypothesis.get("instruments") or []
     asset_class = (hypothesis.get("asset_class") or "").lower()
+    zscore_window = _resolve_window(hypothesis.get("zscore_window"), cfg)
     iteration = _iteration_label(state)
 
-    logger.info("[iter %d] backtest: start", iteration)
+    logger.info("[iter %d] backtest: start (signal=%s, zscore_window=%d)", iteration, signal_name, zscore_window)
     t0 = time.time()
 
     try:
         if "carry" in signal_name or "carry" in asset_class or "fx" in asset_class:
-            signal, returns = _load_fx_carry_signal(instruments, start)
+            signal, returns = _load_fx_carry_signal(instruments, start, zscore_window)
         else:
-            signal, returns = _load_curve_signal(signal_name, start)
+            signal, returns = _load_curve_signal(signal_name, start, zscore_window)
 
         common = signal.index.intersection(returns.index)
         results = run_long_short_backtest(
