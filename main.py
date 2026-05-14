@@ -113,8 +113,8 @@ def _log_final_report(history: list, final_decision: str) -> None:
         except (TypeError, ValueError):
             return "?"
 
-    col_w = [5, 22, 8, 9, 9, 9, 9, 11, 11, 6]
-    headers = ["Iter", "Signal", "Decision", "Sharpe", "MaxDD", "AnnRet", "Turnover", "H1 Sharpe", "H2 Sharpe", "Obs"]
+    col_w = [5, 22, 7, 8, 9, 9, 9, 9, 11, 11, 6]
+    headers = ["Iter", "Signal", "Window", "Decision", "Sharpe", "MaxDD", "AnnRet", "Turnover", "H1 Sharpe", "H2 Sharpe", "Obs"]
     sep = "─" * sum(col_w + [len(col_w) * 3 - 1])
 
     rows = []
@@ -130,6 +130,7 @@ def _log_final_report(history: list, final_decision: str) -> None:
         rows.append([
             str(i),
             (h.get("signal_name") or "?")[:20],
+            str(h.get("zscore_window", "?")),
             c.get("decision", "?").upper(),
             f"{_tick(sharpe, 'sharpe')} {_fmt(sharpe)}",
             f"{_tick(maxdd, 'max_drawdown')} {_fmt(maxdd)}",
