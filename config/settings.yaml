@@ -3,6 +3,9 @@ llm:
   temperature: 0.2
   base_url: "http://localhost:11434"
 
+logging:
+  level: "INFO"   # DEBUG for verbose LLM traces, WARNING or ERROR to silence routine output
+
 data:
   start_date: "2010-01-01"
 
