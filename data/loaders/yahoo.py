@@ -5,6 +5,8 @@ import yfinance as yf
 def load_yahoo_series(ticker: str, start: str = "2010-01-01") -> pd.DataFrame:
     """Download OHLCV data for a ticker from Yahoo Finance."""
     data = yf.download(ticker, start=start, auto_adjust=True, progress=False)
+    if data is None or data.empty:
+        raise ValueError(f"Yahoo Finance returned no data for ticker '{ticker}' (start={start}). May be rate-limited or ticker invalid.")
     data.index.name = "date"
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
