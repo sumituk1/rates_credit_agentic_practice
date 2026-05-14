@@ -30,7 +30,7 @@ def hypothesis_node(state: ResearchState) -> ResearchState:
     out = generate_hypothesis(state)
     logger.info("[iter %d] hypothesis: done in %.1fs", iteration, time.time() - t0)
     hypothesis_payload = out.get("hypothesis", {})
-    logger.debug("[iter %d] hypothesis payload:\n%s", iteration, json.dumps(hypothesis_payload, indent=2, default=str))
+    logger.info("[iter %d] hypothesis payload:\n%s", iteration, json.dumps(hypothesis_payload, indent=2, default=str))
     return out
 
 
