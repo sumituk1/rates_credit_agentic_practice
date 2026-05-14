@@ -1,34 +1,43 @@
 import json
+import logging
 import time
+from pathlib import Path
+
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from graph.workflow import build_graph
 
+_cfg = yaml.safe_load(open(Path(__file__).parent / "config" / "settings.yaml"))
+logging.basicConfig(
+    level=getattr(logging, _cfg["logging"]["level"].upper(), logging.INFO),
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
-def _print_section(title: str, content: str) -> None:
-    print(f"\n{'─' * 60}")
-    print(f"  {title}")
-    print(f"{'─' * 60}")
-    print(content)
+
+def _log_section(title: str, content: str) -> None:
+    logger.info("\n%s\n  %s\n%s\n%s", "─" * 60, title, "─" * 60, content)
 
 
 def main() -> None:
     app = build_graph()
     initial_state = {"iteration": 0, "history": []}
 
-    print("=" * 60)
-    print("  Quant Research Agent — LangGraph + Llama")
-    print("=" * 60)
-    print("[run] invoking graph...", flush=True)
+    logger.info("=" * 60)
+    logger.info("  Quant Research Agent — LangGraph + Llama")
+    logger.info("=" * 60)
+    logger.info("[run] invoking graph...")
     t0 = time.time()
 
     result = app.invoke(initial_state)
-    print(f"[run] graph finished in {time.time() - t0:.1f}s", flush=True)
+    logger.info("[run] graph finished in %.1fs", time.time() - t0)
 
     history = result.get("history", [])
-    print(f"\n[Loop complete] {len(history)} iteration(s), decision='{result.get('decision')}'")
+    logger.info("[Loop complete] %d iteration(s), decision='%s'", len(history), result.get("decision"))
 
     for i, entry in enumerate(history, 1):
         h = entry.get("hypothesis", {})
@@ -37,16 +46,14 @@ def main() -> None:
         reasoning = entry.get("reasoning_trace", "")
         critic_reasoning = entry.get("critic_reasoning", "")
 
-        print(f"\n{'═' * 60}")
-        print(f"  ITERATION {i} — {h.get('signal_name', '?')}  ({c.get('decision', '?').upper()})")
-        print(f"{'═' * 60}")
+        logger.info("\n%s\n  ITERATION %d — %s  (%s)\n%s", "═" * 60, i, h.get("signal_name", "?"), c.get("decision", "?").upper(), "═" * 60)
 
         if reasoning:
-            _print_section("HYPOTHESIS REASONING (CoT)", reasoning)
+            _log_section("HYPOTHESIS REASONING (CoT)", reasoning)
 
-        _print_section("HYPOTHESIS", json.dumps(h, indent=2, default=str))
+        _log_section("HYPOTHESIS", json.dumps(h, indent=2, default=str))
 
-        _print_section(
+        _log_section(
             "EVALUATION",
             f"  Sharpe            : {e.get('sharpe', '?'):.3f}\n"
             f"  Max drawdown      : {e.get('max_drawdown', '?'):.3f}\n"
@@ -58,9 +65,9 @@ def main() -> None:
         )
 
         if critic_reasoning:
-            _print_section("CRITIC REASONING (CoT)", critic_reasoning)
+            _log_section("CRITIC REASONING (CoT)", critic_reasoning)
 
-        _print_section(
+        _log_section(
             "CRITIC DECISION",
             f"  Decision  : {c.get('decision', '?').upper()}\n"
             f"  Reason    : {c.get('reason', '?')}\n"
@@ -69,7 +76,7 @@ def main() -> None:
 
     final_error = result.get("error")
     if final_error:
-        print(f"\n[WARNING] Last error: {final_error}")
+        logger.error("[WARNING] Last error: %s", final_error)
 
 
 if __name__ == "__main__":

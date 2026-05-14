@@ -1,6 +1,7 @@
 from typing import Any, Dict
 import time
 import json
+import logging
 
 from langgraph.graph import StateGraph, END
 
@@ -8,6 +9,8 @@ from graph.state import ResearchState
 from agents.hypothesis_agent import generate_hypothesis
 from agents.evaluation_agent import evaluate_strategy
 from agents.critic_agent import critic_agent
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -22,52 +25,59 @@ def _iteration_label(state: Dict[str, Any]) -> int:
 
 def hypothesis_node(state: ResearchState) -> ResearchState:
     iteration = _iteration_label(state)
-    print(f"[iter {iteration}] hypothesis: start", flush=True)
+    logger.info("[iter %d] hypothesis: start", iteration)
     t0 = time.time()
     out = generate_hypothesis(state)
-    print(f"[iter {iteration}] hypothesis: done in {time.time() - t0:.1f}s", flush=True)
+    logger.info("[iter %d] hypothesis: done in %.1fs", iteration, time.time() - t0)
     hypothesis_payload = out.get("hypothesis", {})
-
-    print(f"[iter {iteration}] hypothesis payload:", flush=True)
-    print(json.dumps(hypothesis_payload, indent=2, default=str), flush=True)
-
+    logger.debug("[iter %d] hypothesis payload:\n%s", iteration, json.dumps(hypothesis_payload, indent=2, default=str))
     return out
 
 
 def evaluate_node(state: ResearchState) -> ResearchState:
     iteration = _iteration_label(state)
-    print(f"[iter {iteration}] evaluate: start", flush=True)
-
+    logger.info("[iter %d] evaluate: start", iteration)
     t0 = time.time()
     out = evaluate_strategy(state)
-
-    print(f"[iter {iteration}] evaluate: done in {time.time() - t0:.1f}s", flush=True)
-
+    logger.info("[iter %d] evaluate: done in %.1fs", iteration, time.time() - t0)
     evaluation = out.get("evaluation", {})
-
-    print(f"[iter {iteration}] backtest/evaluation summary:", flush=True)
-    print(f"Sharpe ratio        : {evaluation.get('sharpe', '?')}", flush=True)
-    print(f"Max drawdown        : {evaluation.get('max_drawdown', '?')}", flush=True)
-    print(f"Annualised return   : {evaluation.get('annualized_return', '?')}", flush=True)
-    print(f"Avg daily turnover  : {evaluation.get('avg_turnover', '?')}", flush=True)
-    print(f"Observations        : {evaluation.get('n_obs', '?')}", flush=True)
-    print(f"Sufficient history  : {evaluation.get('has_min_history', '?')}", flush=True)
-    print(f"First-half Sharpe   : {evaluation.get('first_half_sharpe', '?')}", flush=True)
-    print(f"Second-half Sharpe  : {evaluation.get('second_half_sharpe', '?')}", flush=True)
-    print(f"First-half MaxDD    : {evaluation.get('first_half_drawdown', '?')}", flush=True)
-    print(f"Second-half MaxDD   : {evaluation.get('second_half_drawdown', '?')}", flush=True)
+    logger.info(
+        "[iter %d] backtest/evaluation summary:\n"
+        "  Sharpe ratio        : %s\n"
+        "  Max drawdown        : %s\n"
+        "  Annualised return   : %s\n"
+        "  Avg daily turnover  : %s\n"
+        "  Observations        : %s\n"
+        "  Sufficient history  : %s\n"
+        "  First-half Sharpe   : %s\n"
+        "  Second-half Sharpe  : %s\n"
+        "  First-half MaxDD    : %s\n"
+        "  Second-half MaxDD   : %s",
+        iteration,
+        evaluation.get("sharpe", "?"),
+        evaluation.get("max_drawdown", "?"),
+        evaluation.get("annualized_return", "?"),
+        evaluation.get("avg_turnover", "?"),
+        evaluation.get("n_obs", "?"),
+        evaluation.get("has_min_history", "?"),
+        evaluation.get("first_half_sharpe", "?"),
+        evaluation.get("second_half_sharpe", "?"),
+        evaluation.get("first_half_drawdown", "?"),
+        evaluation.get("second_half_drawdown", "?"),
+    )
     return out
 
 
 def critic_node(state: ResearchState) -> ResearchState:
     iteration = _iteration_label(state)
-    print(f"[iter {iteration}] critic: start", flush=True)
+    logger.info("[iter %d] critic: start", iteration)
     t0 = time.time()
     out = critic_agent(state)
-    print(f"[iter {iteration}] critic: done in {time.time() - t0:.1f}s", flush=True)
+    logger.info("[iter %d] critic: done in %.1fs", iteration, time.time() - t0)
     critic_payload = out.get("critic", {})
-    print(f"[iter {iteration}] critic payload:", flush=True)
-    print(
+    logger.info(
+        "[iter %d] critic payload:\n%s",
+        iteration,
         json.dumps(
             {
                 "decision": critic_payload.get("decision", "?"),
@@ -77,7 +87,6 @@ def critic_node(state: ResearchState) -> ResearchState:
             indent=2,
             default=str,
         ),
-        flush=True,
     )
     return out
 
@@ -157,7 +166,7 @@ def backtest_node(state: ResearchState) -> ResearchState:
     asset_class = (hypothesis.get("asset_class") or "").lower()
     iteration = _iteration_label(state)
 
-    print(f"[iter {iteration}] backtest: start", flush=True)
+    logger.info("[iter %d] backtest: start", iteration)
     t0 = time.time()
 
     try:
@@ -175,10 +184,11 @@ def backtest_node(state: ResearchState) -> ResearchState:
         state["backtest_results"] = results
         state["error"] = None
     except Exception as exc:
+        logger.error("[iter %d] backtest failed: %s", iteration, exc)
         state["backtest_results"] = None
         state["error"] = str(exc)
     finally:
-        print(f"[iter {iteration}] backtest: done in {time.time() - t0:.1f}s", flush=True)
+        logger.info("[iter %d] backtest: done in %.1fs", iteration, time.time() - t0)
 
     return state
 
@@ -199,7 +209,7 @@ def record_iteration(state: ResearchState) -> ResearchState:
     })
     iteration = _iteration_label(state)
     decision = (state.get("decision") or "unknown").upper()
-    print(f"[iter {iteration}] record: decision={decision}", flush=True)
+    logger.info("[iter %d] record: decision=%s", iteration, decision)
     return {**state, "history": history, "iteration": state.get("iteration", 0) + 1}
 
 
@@ -219,7 +229,7 @@ def route_after_record(state: ResearchState) -> str:
         return "end"
 
     if iteration >= max_iter:
-        print(f"[workflow] max iterations ({max_iter}) reached — stopping.")
+        logger.info("[workflow] max iterations (%d) reached — stopping.", max_iter)
         return "end"
 
     return "retry"
