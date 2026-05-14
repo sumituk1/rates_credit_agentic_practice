@@ -7,7 +7,7 @@ from backtests.validation import sub_period_check, has_minimum_history
 def evaluate_strategy(state: Dict[str, Any]) -> Dict[str, Any]:
     """LangGraph node: compute performance metrics from backtest results (pure Python, no LLM)."""
     results = state.get("backtest_results")
-    if results is None:
+    if results is None or results.empty:
         state["evaluation"] = {"error": "No backtest results available"}
         return state
 

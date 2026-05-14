@@ -2,6 +2,7 @@ from typing import Any, Dict
 import time
 import json
 import logging
+import traceback
 
 from langgraph.graph import StateGraph, END
 
@@ -185,9 +186,9 @@ def backtest_node(state: ResearchState) -> ResearchState:
         state["backtest_results"] = results
         state["error"] = None
     except Exception as exc:
-        logger.error("[iter %d] backtest failed: %s", iteration, exc)
+        logger.error("[iter %d] backtest failed: %s\n%s", iteration, exc, traceback.format_exc())
         state["backtest_results"] = None
-        state["error"] = str(exc)
+        state["error"] = traceback.format_exc()
     finally:
         logger.info("[iter %d] backtest: done in %.1fs", iteration, time.time() - t0)
 
