@@ -223,6 +223,31 @@ def _normalize_hypothesis_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _already_tried(hypothesis: "Hypothesis", history: List[Dict[str, Any]]) -> bool:
+    """Return True if this (signal_name, zscore_window) combo was used in a prior iteration."""
+    for entry in history:
+        h = entry.get("hypothesis", {})
+        if (
+            h.get("signal_name") == hypothesis.signal_name
+            and h.get("zscore_window") == hypothesis.zscore_window
+        ):
+            return True
+    return False
+
+
+def _dedupe_prompt(tried: List[Dict[str, Any]]) -> str:
+    combos = ", ".join(
+        f"{h.get('signal_name')}(window={h.get('zscore_window')})" for h in tried
+    )
+    remaining = [s for s in SUPPORTED_SIGNAL_NAMES if s not in {h.get("signal_name") for h in tried}]
+    remaining_str = ", ".join(remaining) if remaining else "any signal with a different zscore_window"
+    return (
+        f"IMPORTANT: The following (signal, window) combinations have already been backtested: {combos}. "
+        f"You MUST produce a hypothesis with a different combination. "
+        f"Untried signals: {remaining_str}."
+    )
+
+
 def generate_hypothesis(state: Dict[str, Any]) -> Dict[str, Any]:
     """LangGraph node: CoT hypothesis generation with macro context + iteration memory."""
     llm = get_llm()
@@ -237,12 +262,26 @@ def generate_hypothesis(state: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     for attempt in range(3):
-        raw = llm.invoke([HumanMessage(content=prompt)])
+        # On retry after a duplicate, prepend an explicit deduplication instruction
+        active_prompt = prompt
+        if attempt > 0:
+            tried = [e.get("hypothesis", {}) for e in history]
+            active_prompt = _dedupe_prompt(tried) + "\n\n" + prompt
+
+        raw = llm.invoke([HumanMessage(content=active_prompt)])
         text = raw.content if hasattr(raw, "content") else str(raw)
         try:
             parsed = _parse_hypothesis_json(text, llm)
             normalized = _normalize_hypothesis_payload(parsed)
             hypothesis = Hypothesis(**normalized)
+
+            if _already_tried(hypothesis, history):
+                if attempt == 2:
+                    # Accept it on final attempt rather than crashing — better than no hypothesis
+                    pass
+                else:
+                    continue
+
             state["hypothesis"] = hypothesis.model_dump()
             state["reasoning_trace"] = _extract_reasoning(text)
             return state
